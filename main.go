@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -18,7 +17,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s", err)
+		fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(2)
 	}
 }
@@ -31,46 +30,39 @@ func run() error {
 		identifier = flag.String("id", "", "bundle identifier")
 		icon       = flag.String("icon", "", "icon image file (.icns|.png|.jpg|.jpeg)")
 	)
+
 	flag.Parse()
 	args := flag.Args()
 	if len(args) < 1 {
 		return errors.New("missing executable argument")
 	}
+
 	bin := args[0]
 	appname := *name + ".app"
 	contentsPath := filepath.Join(appname, "Contents")
 	appPath := filepath.Join(contentsPath, "MacOS")
 	resouresPath := filepath.Join(contentsPath, "Resources")
 	binPath := filepath.Join(appPath, appname)
-	if err := os.MkdirAll(appPath, 0777); err != nil {
+
+	if err := os.MkdirAll(appPath, 0755); err != nil {
 		return errors.Wrap(err, "os.MkdirAll appPath")
 	}
-	fdst, err := os.Create(binPath)
-	if err != nil {
-		return errors.Wrap(err, "create bin")
+
+	if err := copyFile(bin, binPath, 0755); err != nil {
+		return err
 	}
-	defer fdst.Close()
-	fsrc, err := os.Open(bin)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return errors.New(bin + " not found")
+
+	for _, f := range args[1:] {
+		if err := copyFile(f, filepath.Join(appPath, filepath.Base(f)), 0755); err != nil {
+			return err
 		}
-		return errors.Wrap(err, "os.Open")
 	}
-	defer fsrc.Close()
-	if _, err := io.Copy(fdst, fsrc); err != nil {
-		return errors.Wrap(err, "copy bin")
-	}
-	if err := exec.Command("chmod", "+x", appPath).Run(); err != nil {
-		return errors.Wrap(err, "chmod: "+appPath)
-	}
-	if err := exec.Command("chmod", "+x", binPath).Run(); err != nil {
-		return errors.Wrap(err, "chmod: "+binPath)
-	}
+
 	id := *identifier
 	if id == "" {
 		id = *author + "." + *name
 	}
+
 	info := infoListData{
 		Name:               *name,
 		Executable:         filepath.Join("MacOS", appname),
@@ -79,6 +71,7 @@ func run() error {
 		InfoString:         *name + " by " + *author,
 		ShortVersionString: *version,
 	}
+
 	if *icon != "" {
 		iconPath, err := prepareIcons(*icon, resouresPath)
 		if err != nil {
@@ -86,10 +79,12 @@ func run() error {
 		}
 		info.IconFile = filepath.Base(iconPath)
 	}
+
 	tpl, err := template.New("template").Parse(infoPlistTemplate)
 	if err != nil {
 		return errors.Wrap(err, "infoPlistTemplate")
 	}
+
 	fplist, err := os.Create(filepath.Join(contentsPath, "Info.plist"))
 	if err != nil {
 		return errors.Wrap(err, "create Info.plist")
@@ -98,9 +93,30 @@ func run() error {
 	if err := tpl.Execute(fplist, info); err != nil {
 		return errors.Wrap(err, "execute Info.plist template")
 	}
-	if err := ioutil.WriteFile(filepath.Join(contentsPath, "README"), []byte(readme), 0666); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(contentsPath, "README"), []byte(readme), 0644); err != nil {
 		return errors.Wrap(err, "ioutil.WriteFile")
 	}
+	return nil
+}
+
+func copyFile(src, dest string, perm os.FileMode) error {
+	fsrc, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+
+	fdst, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE, perm)
+	if err != nil {
+		return errors.Wrap(err, "create "+dest)
+	}
+
+	defer fdst.Close()
+	defer fsrc.Close()
+
+	if _, err := io.Copy(fdst, fsrc); err != nil {
+		return errors.Wrap(err, "copy "+src)
+	}
+
 	return nil
 }
 
@@ -114,7 +130,7 @@ func prepareIcons(iconPath, resourcesPath string) (string, error) {
 		return "", errors.Wrap(err, "open icon file")
 	}
 	defer fsrc.Close()
-	if err := os.MkdirAll(resourcesPath, 0777); err != nil {
+	if err := os.MkdirAll(resourcesPath, 0755); err != nil {
 		return "", errors.Wrap(err, "os.MkdirAll resourcesPath")
 	}
 	destFile := filepath.Join(resourcesPath, "icon.icns")
@@ -125,8 +141,7 @@ func prepareIcons(iconPath, resourcesPath string) (string, error) {
 	defer fdst.Close()
 	switch ext {
 	case ".icns": // just copy the .icns file
-		_, err := io.Copy(fdst, fsrc)
-		if err != nil {
+		if _, err := io.Copy(fdst, fsrc); err != nil {
 			return destFile, errors.Wrap(err, "copying "+iconPath)
 		}
 	case ".png", ".jpg", ".jpeg", ".gif": // process any images
@@ -184,7 +199,7 @@ const infoPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 // readme goes into a README file inside the package for
 // future reference.
 const readme = `Made with Appify by Machine Box
-https://github.com/machinebox/appify
+https://github.com/raff/appify
 
 Inspired by https://gist.github.com/anmoljagetia/d37da67b9d408b35ac753ce51e420132 
 `
